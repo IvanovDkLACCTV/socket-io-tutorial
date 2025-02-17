@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <title>Socket.IO chat</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="header"><h3>Socket.IO chat</h3></header>
+    <main>
+      <ul id="messages"></ul>
+      <form id="form" action="">
+        <label for="input" class="visually-hidden">Message</label>
+        <input
+          id="input"
+          autocomplete="off"
+          placeholder="Type your message here..."
+        />
+        <button type="submit">Send</button>
+        <button id="toggle-btn" type="submit">Disconnect</button>
+      </form>
+    </main>
+    <footer></footer>
+    <script src="./node_modules/socket.io/client-dist/socket.io.js"></script>
+    <script>
+      const socket = io("http://localhost:3000", {
+        auth: {
+          serverOffset: 0,
+        },
+      }) // Указываем адрес сервера Socket.IO
+      const form = document.getElementById("form")
+      const input = document.getElementById("input")
+      const messages = document.getElementById("messages") // Получаем элемент <ul>
+
+      // Обработчик отправки формы
+      form.addEventListener("submit", (e) => {
+        e.preventDefault()
+        if (input.value) {
+          socket.emit("chat message", input.value) // Отправляем сообщение на сервер
+          input.value = ""
+        }
+      })
+
+      // Обработчик получения сообщения от сервера
+      socket.on("chat message", (msg, serverOffset) => {
+        const item = document.createElement("li") // Создаём элемент <li>
+        item.textContent = msg // Добавляем текст сообщения
+        messages.appendChild(item) // Добавляем <li> в <ul>
+        socket.auth.serverOffset = serverOffset
+      })
+    </script>
+    <script>
+      const toggleButton = document.getElementById("toggle-btn")
+
+      toggleButton.addEventListener("click", (e) => {
+        e.preventDefault()
+        if (socket.connected) {
+          toggleButton.innerText = "Connect"
+          socket.disconnect()
+        } else {
+          toggleButton.innerText = "Disconnect"
+          socket.connect()
+        }
+      })
+    </script>
+  </body>
+</html>
