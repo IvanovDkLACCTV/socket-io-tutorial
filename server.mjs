@@ -6,6 +6,9 @@ import { Server } from "socket.io"
 import cors from "cors"
 import sqlite3 from "sqlite3"
 import { open } from "sqlite"
+import { availableParallelism } from "node:os"
+import cluster from "node:cluster"
+import { createAdapter, setupPrimary } from "@socket.io/cluster-adapter"
 
 // open the database file
 const db = await open({
@@ -22,78 +25,94 @@ await db.exec(`
   );
 `)
 
-const app = express()
-const server = createServer(app)
-
-// Настройка CORS для Express
-app.use(
-  cors({
-    origin: "http://127.0.0.1:5500", // Разрешаем запросы только от этого origin
-    methods: ["GET", "POST"],
-    credentials: true, // Разрешаем передачу куки и заголовков авторизации
-  })
-)
-
-// Настройка CORS для Socket.IO
-const io = new Server(server, {
-  cors: {
-    origin: "http://127.0.0.1:5500", // Разрешаем запросы только от этого origin
-    methods: ["GET", "POST"],
-  },
-  connectionStateRecovery: {},
-  cookie: {},
-})
-
-const log = console.log
-
-const __dirname = dirname(fileURLToPath(import.meta.url))
-
-app.get("/", (req, res) => {
-  res.sendFile(join(__dirname, "index.html"))
-})
-
-io.on("connection", (socket) => {
-  console.log("a user connected")
-
-  socket.on("chat message", (msg) => {
-    console.log("message: " + msg)
-    // Отправляем сообщение всем подключённым клиентам
-    io.emit("chat message", msg)
-  })
-
-  socket.on("disconnect", () => {
-    console.log("user disconnected")
-  })
-})
-
-io.on("connection", async (socket) => {
-  socket.on("chat message", async (msg) => {
-    let result
-    try {
-      result = await db.run("INSERT INTO messages (content) VALUES (?)", msg)
-    } catch (e) {
-      // TODO handle the failure
-      return
-    }
-    io.emit("chat message", msg, result.lastID)
-  })
-
-  if (!socket.recovered) {
-    // if the connection state recovery was not successful
-    try {
-      await db.each(
-        "SELECT id, content FROM messages WHERE id > ?",
-        [socket.handshake.auth.serverOffset || 0],
-        (_err, row) => {
-          socket.emit("chat message", row.content, row.id)
-        }
-      )
-    } catch (e) {
-      // something went wrong
-    }
+if (cluster.isPrimary) {
+  const numCPUs = availableParallelism()
+  // create one worker per available core
+  for (let i = 0; i < numCPUs; i++) {
+    cluster.fork({
+      PORT: 3000 + i,
+    })
   }
-})
 
-server.listen(3000, () => {
-  log("server running at http://localhost:3000")
-})
+  // set up the adapter on the primary thread
+  setupPrimary()
+} else {
+  const app = express()
+  const server = createServer(app)
+
+  // Настройка CORS для Express
+  app.use(
+    cors({
+      origin: "http://127.0.0.1:5500", // Разрешаем запросы только от этого origin
+      methods: ["GET", "POST"],
+      credentials: true, // Разрешаем передачу куки и заголовков авторизации
+    })
+  )
+
+  // Настройка CORS для Socket.IO
+  const io = new Server(server, {
+    cors: {
+      origin: "http://127.0.0.1:5500", // Разрешаем запросы только от этого origin
+      methods: ["GET", "POST"],
+    },
+    connectionStateRecovery: {},
+    cookie: {},
+    // set up the adapter on each worker thread
+    adapter: createAdapter(),
+  })
+  const log = console.log
+
+  const __dirname = dirname(fileURLToPath(import.meta.url))
+
+  app.get("/", (req, res) => {
+    res.sendFile(join(__dirname, "index.html"))
+  })
+
+  io.on("connection", async (socket) => {
+    console.log("a user connected")
+
+    socket.on("chat message", async (msg, clientOffset, callback) => {
+      let result
+      try {
+        result = await db.run(
+          "INSERT INTO messages (content, client_offset) VALUES (?, ?)",
+          msg,
+          clientOffset
+        )
+      } catch (e) {
+        if (e.errno === 19 /* SQLITE_CONSTRAINT */) {
+          // the message was already inserted, so we notify the client
+          callback()
+        } else {
+          // nothing to do, just let the client retry
+        }
+        return
+      }
+      io.emit("chat message", msg, result.lastID)
+      // acknowledge the event
+      callback()
+    })
+
+    // Logic for recovering messages
+    if (!socket.recovered) {
+      try {
+        await db.each(
+          "SELECT id, content FROM messages WHERE id > ?",
+          [socket.handshake.auth.serverOffset || 0],
+          (_err, row) => {
+            socket.emit("chat message", row.content, row.id)
+          }
+        )
+      } catch (e) {
+        // something went wrong
+      }
+    }
+  })
+
+  // each worker will listen on a distinct port
+  const port = process.env.PORT
+
+  server.listen(port, () => {
+    console.log(`server running at http://localhost:${port}`)
+  })
+}

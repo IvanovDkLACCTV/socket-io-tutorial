@@ -5,6 +5,7 @@
   "type": "module",
   "main": "server.js",
   "dependencies": {
+    "@socket.io/cluster-adapter": "^0.2.2",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "socket.io": "^4.8.1",
